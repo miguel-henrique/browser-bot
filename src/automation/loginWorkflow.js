@@ -89,69 +89,99 @@ async function fillIfEmpty(page, selector, value, logger, fieldName) {
 }
 
 async function validateLoginSuccess(page, config, logger) {
-  if (config.loginSuccess.urlContains) {
-    await page.waitForFunction(
-      (expected) => window.location.href.includes(expected),
-      { timeout: 30000 },
-      config.loginSuccess.urlContains
-    );
-    return true;
-  }
+  const defaultSuccessSelector = "#messages .ui-messages-info, #messages .ui-messages-info-summary";
+  const defaultSuccessText = "Ponto registrado com sucesso";
 
-  if (config.loginSuccess.selector) {
-    await page.waitForSelector(config.loginSuccess.selector, {
-      timeout: 30000,
-      visible: true
-    });
-    return true;
-  }
+  const explicitSuccessSelector = config.loginSuccess.selector || defaultSuccessSelector;
+  const explicitSuccessText = config.loginSuccess.text || defaultSuccessText;
+  const isContextDestroyedError = (error) =>
+    error &&
+    typeof error.message === "string" &&
+    error.message.includes("Execution context was destroyed");
 
-  if (config.loginSuccess.text) {
-    await page.waitForFunction(
-      (txt) => document.body && document.body.innerText.includes(txt),
-      { timeout: 30000 },
-      config.loginSuccess.text
-    );
-    return true;
-  }
+  const deadlineMs = Date.now() + 12000;
+  let contextResetCount = 0;
 
-  // Fallback path: wait for page to settle, then infer success/failure.
-  await Promise.race([
-    page.waitForNavigation({ waitUntil: "networkidle2", timeout: 8000 }).catch(() => null),
-    new Promise((resolve) => setTimeout(resolve, config.loginSuccess.settleWaitMs))
-  ]);
+  while (Date.now() < deadlineMs) {
+    try {
+      if (config.loginSuccess.urlContains && page.url().includes(config.loginSuccess.urlContains)) {
+        logger.info("Detected success by URL", { url: page.url() });
+        return true;
+      }
 
-  if (config.loginSuccess.errorSelector) {
-    const errorPresent = await page.$(config.loginSuccess.errorSelector);
-    if (errorPresent) {
-      const errorText = await page.$eval(
-        config.loginSuccess.errorSelector,
-        (el) => (el.textContent || "").trim()
+      const messages = await page.$$eval(
+        "#messages .ui-messages-info-summary, #messages .ui-messages-info, #messages .ui-messages-error-summary, #messages .ui-messages-error-detail, #messages .ui-message-error-detail",
+        (els) => els.map((el) => (el.textContent || "").trim()).filter(Boolean)
       );
-      throw new Error(`Login failed with page error: ${errorText || "unknown error message"}`);
+
+      const successMessage = messages.find((text) =>
+        explicitSuccessText ? text.includes(explicitSuccessText) : false
+      );
+      if (successMessage) {
+        logger.info("Detected success message", { message: successMessage });
+        return true;
+      }
+
+      const errorMessage = messages.find((text) =>
+        /captcha|incorreto|inv[aá]lido|erro/i.test(text)
+      );
+      if (errorMessage) {
+        throw new Error(`Login failed with page error: ${errorMessage}`);
+      }
+
+      if (explicitSuccessSelector) {
+        const successHandle = await page.$(explicitSuccessSelector);
+        if (successHandle) {
+          logger.info("Detected success message by selector", {
+            selector: explicitSuccessSelector
+          });
+          return true;
+        }
+      }
+    } catch (error) {
+      if (!isContextDestroyedError(error)) {
+        throw error;
+      }
+      contextResetCount += 1;
+      logger.warn("Execution context changed while validating submit result", {
+        contextResetCount
+      });
     }
+
+    await new Promise((resolve) => setTimeout(resolve, 600));
   }
 
   const loginFieldsStillVisible = await Promise.all([
-    isVisible(page, config.selectors.username),
-    isVisible(page, config.selectors.password)
+    isVisible(page, config.selectors.username).catch(() => false),
+    isVisible(page, config.selectors.password).catch(() => false)
   ]);
+  throw new Error(
+    `Submit result timeout (login form still visible: ${loginFieldsStillVisible.some(Boolean)})`
+  );
+}
 
-  if (loginFieldsStillVisible.some(Boolean)) {
-    logger.warn("Login form is still visible after submit", {
-      usernameVisible: loginFieldsStillVisible[0],
-      passwordVisible: loginFieldsStillVisible[1],
-      currentUrl: page.url()
-    });
-    throw new Error("Login appears to have failed (still on login form)");
-  }
+function isCaptchaMismatchError(error) {
+  const message = String(error?.message || "");
+  return /captcha/i.test(message) && /n[aã]o corresponde|inv[aá]lido|incorrect|incorreto/i.test(message);
+}
 
-  return true;
+function isRetryableCaptchaError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  return (
+    isCaptchaMismatchError(error) ||
+    message.includes("ocr result invalid") ||
+    message.includes("ocr too uncertain") ||
+    message.includes("could not read") ||
+    message.includes("segmented ocr") ||
+    message.includes("captcha image changed") ||
+    message.includes("captcha value mismatch before submit")
+  );
 }
 
 async function runLoginWorkflow(config, logger) {
   const runId = buildRunId();
   let browser;
+  let activePage;
 
   try {
     logger.info("Launching browser", {
@@ -166,6 +196,7 @@ async function runLoginWorkflow(config, logger) {
     });
 
     const page = await browser.newPage();
+    activePage = page;
     page.setDefaultTimeout(config.browser.navigationTimeoutMs);
     page.setDefaultNavigationTimeout(config.browser.navigationTimeoutMs);
 
@@ -176,96 +207,159 @@ async function runLoginWorkflow(config, logger) {
 
     logger.info("Loaded login page", { url: page.url() });
 
-    // Fill sequentially to avoid focus/typing race conditions on the same page.
-    const usernameValue = await fillIfEmpty(
-      page,
-      config.selectors.username,
-      config.loginUser,
-      logger,
-      "username"
-    );
-    const passwordValue = await fillIfEmpty(
-      page,
-      config.selectors.password,
-      config.loginPassword,
-      logger,
-      "password"
-    );
-
-    if (config.runtime.debugLogValues) {
-      logger.info("Field debug values", {
-        username: usernameValue,
-        passwordLength: passwordValue.length
-      });
-    }
-
-    if (config.captcha.enabled) {
-      logger.info("CAPTCHA enabled; waiting for image");
-      await page.waitForSelector(config.selectors.captchaImage, {
-        timeout: 20000,
-        visible: true
+    const totalCaptchaAttempts = Math.max(1, config.captcha.maxSubmitAttempts);
+    for (let captchaAttempt = 1; captchaAttempt <= totalCaptchaAttempts; captchaAttempt += 1) {
+      logger.info("Starting captcha submit attempt", {
+        captchaAttempt,
+        totalCaptchaAttempts
       });
 
-      const captchaElement = await page.$(config.selectors.captchaImage);
-      if (!captchaElement) {
-        throw new Error("CAPTCHA image element was not found");
-      }
-
-      const imageBuffer = await captchaElement.screenshot({ encoding: "binary" });
-      await ensureDirExists(config.runtime.screenshotDir);
-      const captchaShot = path.join(config.runtime.screenshotDir, `${runId}-captcha.png`);
-      await fs.writeFile(captchaShot, imageBuffer);
-      logger.info("CAPTCHA image captured", { screenshot: captchaShot });
-      const solvedCaptcha = await solveCaptcha(imageBuffer, config, logger);
-
-      await page.waitForSelector(config.selectors.captchaInput, {
-        timeout: 10000,
-        visible: true
-      });
-      await page.click(config.selectors.captchaInput, { clickCount: 3 });
-      const enteredCaptcha = await setInputValueAndDispatch(
+      // Refill each attempt in case the page cleared fields after a submit.
+      const usernameValue = await fillIfEmpty(
         page,
-        config.selectors.captchaInput,
-        solvedCaptcha
+        config.selectors.username,
+        config.loginUser,
+        logger,
+        "username"
       );
-      logger.info("CAPTCHA value entered", {
-        enteredLength: enteredCaptcha.length
-      });
-      if (enteredCaptcha !== solvedCaptcha) {
-        throw new Error(
-          `CAPTCHA value mismatch before submit (solved=${solvedCaptcha}, entered=${enteredCaptcha})`
-        );
-      }
+      const passwordValue = await fillIfEmpty(
+        page,
+        config.selectors.password,
+        config.loginPassword,
+        logger,
+        "password"
+      );
+
       if (config.runtime.debugLogValues) {
-        logger.info("CAPTCHA debug values", {
-          solvedCaptcha,
-          enteredCaptcha
-        });
-      } else {
-        logger.info("CAPTCHA solved preview", {
-          solvedCaptchaMasked: maskValue(solvedCaptcha)
+        logger.info("Field debug values", {
+          username: usernameValue,
+          passwordLength: passwordValue.length
         });
       }
-    } else {
-      logger.info("CAPTCHA handling is disabled by config");
+
+      if (config.captcha.enabled) {
+        logger.info("CAPTCHA enabled; waiting for image");
+        await page.waitForSelector(config.selectors.captchaImage, {
+          timeout: 20000,
+          visible: true
+        });
+
+        const captchaMetaBefore = await page.$eval(config.selectors.captchaImage, (el) => ({
+          src: el.getAttribute("src") || "",
+          currentSrc: el.currentSrc || ""
+        }));
+        logger.info("CAPTCHA metadata before OCR", captchaMetaBefore);
+
+        const captchaElement = await page.$(config.selectors.captchaImage);
+        if (!captchaElement) {
+          throw new Error("CAPTCHA image element was not found");
+        }
+
+        const imageBuffer = await captchaElement.screenshot({ encoding: "binary" });
+        await ensureDirExists(config.runtime.screenshotDir);
+        const captchaShot = path.join(
+          config.runtime.screenshotDir,
+          `${runId}-attempt-${captchaAttempt}-captcha.png`
+        );
+        await fs.writeFile(captchaShot, imageBuffer);
+        logger.info("CAPTCHA image captured", { screenshot: captchaShot });
+        const solvedCaptcha = await solveCaptcha(imageBuffer, config, logger);
+
+        console.log("[CAPTCHA] Resolved code:", solvedCaptcha);
+
+        await page.waitForSelector(config.selectors.captchaInput, {
+          timeout: 10000,
+          visible: true
+        });
+        await page.click(config.selectors.captchaInput, { clickCount: 3 });
+        const enteredCaptcha = await setInputValueAndDispatch(
+          page,
+          config.selectors.captchaInput,
+          solvedCaptcha
+        );
+        logger.info("CAPTCHA value entered", {
+          enteredLength: enteredCaptcha.length
+        });
+        if (enteredCaptcha !== solvedCaptcha) {
+          throw new Error(
+            `CAPTCHA value mismatch before submit (solved=${solvedCaptcha}, entered=${enteredCaptcha})`
+          );
+        }
+
+        const captchaMetaBeforeSubmit = await page.$eval(config.selectors.captchaImage, (el) => ({
+          src: el.getAttribute("src") || "",
+          currentSrc: el.currentSrc || ""
+        }));
+        if (
+          captchaMetaBeforeSubmit.src !== captchaMetaBefore.src ||
+          captchaMetaBeforeSubmit.currentSrc !== captchaMetaBefore.currentSrc
+        ) {
+          throw new Error("CAPTCHA image changed after OCR and before submit");
+        }
+
+        const preSubmitShot = await capture(page, config, runId, `attempt-${captchaAttempt}-pre-submit`);
+        logger.info("Pre-submit screenshot captured", { screenshot: preSubmitShot });
+
+        if (config.runtime.debugLogValues) {
+          logger.info("CAPTCHA debug values", {
+            solvedCaptcha,
+            enteredCaptcha
+          });
+        } else {
+          logger.info("CAPTCHA solved preview", {
+            solvedCaptchaMasked: maskValue(solvedCaptcha)
+          });
+        }
+      } else {
+        logger.info("CAPTCHA handling is disabled by config");
+      }
+
+      const settleMs = Math.max(0, Number(config.captcha.submitDelayMs) || 0);
+      if (settleMs > 0) {
+        logger.info("Waiting before submit", { ms: settleMs });
+        await new Promise((resolve) => setTimeout(resolve, settleMs));
+      }
+
+      await page.waitForSelector(config.selectors.submit, { timeout: 10000, visible: true });
+      await page.click(config.selectors.submit);
+      logger.info("Submitted login form");
+
+      try {
+        await validateLoginSuccess(page, config, logger);
+        const successShot = await capture(page, config, runId, "success");
+        logger.info("Workflow completed successfully", { screenshot: successShot });
+        return;
+      } catch (error) {
+        if (isRetryableCaptchaError(error) && captchaAttempt < totalCaptchaAttempts) {
+          logger.warn("Retryable CAPTCHA failure, trying a fresh captcha", {
+            captchaAttempt,
+            totalCaptchaAttempts,
+            error: error.message
+          });
+          try {
+            await page.reload({
+              waitUntil: "networkidle2",
+              timeout: config.browser.navigationTimeoutMs
+            });
+          } catch (reloadError) {
+            logger.warn("Page reload failed after captcha retryable error", {
+              error: reloadError.message
+            });
+          }
+          await new Promise((resolve) => setTimeout(resolve, 700));
+          continue;
+        }
+        throw error;
+      }
     }
 
-    await page.waitForSelector(config.selectors.submit, { timeout: 10000, visible: true });
-    await page.click(config.selectors.submit);
-    logger.info("Submitted login form");
-
-    await validateLoginSuccess(page, config, logger);
-    const successShot = await capture(page, config, runId, "success");
-    logger.info("Workflow completed successfully", { screenshot: successShot });
+    throw new Error("CAPTCHA attempts exhausted without success");
   } catch (error) {
     logger.error("Workflow failed", { error: error.message });
-    if (browser) {
+    if (browser && activePage) {
       try {
-        const [page] = await browser.pages();
-        if (page) {
-          const failShot = await capture(page, config, runId, "failure");
-          logger.info("Failure screenshot captured", { screenshot: failShot });
-        }
+        const failShot = await capture(activePage, config, runId, "failure");
+        logger.info("Failure screenshot captured", { screenshot: failShot });
       } catch (captureError) {
         logger.warn("Could not capture failure screenshot", {
           error: captureError.message

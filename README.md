@@ -36,7 +36,7 @@ cp .env.example .env
 3. Edit `.env` with your real values.
 
 > Sensitive values such as `LOGIN_USER`, `LOGIN_PASSWORD`, and API keys must stay in `.env` and never be hardcoded.
-> If a value contains `#` (such as CSS selectors like `input#j_username`), wrap it in double quotes in `.env`.
+> If a value contains `#` (including passwords, tokens, or selectors like `input#j_username`), wrap it in double quotes in `.env`.
 
 ## Run
 
@@ -60,7 +60,9 @@ npm run run:once
 ## CAPTCHA Notes
 
 - Use `ENABLE_CAPTCHA=true|false` to toggle CAPTCHA handling.
-- Choose provider using `CAPTCHA_PROVIDER=ocr|api`.
+- Choose provider using `CAPTCHA_PROVIDER=ocr|api|manual`.
+- Optional safety valve: set `CAPTCHA_MANUAL_FALLBACK=true` to prompt for manual input when OCR fails.
+- `CAPTCHA_SUBMIT_MAX_ATTEMPTS` controls automated retries for wrong CAPTCHA submissions within a single run.
 - External API solving should only be enabled in approved/legal environments.
 - OCR tuning options:
   - `OCR_EXPECTED_LENGTH` (default `4`)

@@ -1,6 +1,8 @@
 const { createWorker } = require("tesseract.js");
 const sharp = require("sharp");
 
+const UPSCALE_WIDTH = 1200;
+
 function normalizeOcrText(text, numericOnly) {
   const cleaned = String(text || "")
     .replace(/\s+/g, "")
@@ -11,7 +13,6 @@ function normalizeOcrText(text, numericOnly) {
     return cleaned;
   }
 
-  // Common OCR confusions for captcha-like fonts.
   return cleaned
     .replace(/[OQD]/g, "0")
     .replace(/[IL]/g, "1")
@@ -21,239 +22,260 @@ function normalizeOcrText(text, numericOnly) {
     .replace(/\D/g, "");
 }
 
-function scoreCandidate(value, expectedLength) {
-  if (!value) {
-    return -1;
-  }
-  const lengthPenalty = Math.abs(value.length - expectedLength);
-  return 100 - lengthPenalty * 10;
+async function paddedSource(imageBuffer) {
+  return sharp(imageBuffer)
+    .flatten({ background: { r: 255, g: 255, b: 255 } })
+    .extend({
+      top: 40,
+      bottom: 40,
+      left: 64,
+      right: 64,
+      background: { r: 255, g: 255, b: 255 }
+    })
+    .png()
+    .toBuffer();
 }
 
-async function buildImageVariants(imageBuffer) {
-  const base = sharp(imageBuffer).grayscale().normalize();
-  const metadata = await base.metadata();
-  const targetWidth = Math.max(560, (metadata.width || 280) * 2);
-
-  const variants = [];
-  variants.push({ name: "raw", buffer: imageBuffer });
-  variants.push({
-    name: "normalized",
-    buffer: await base.resize({ width: targetWidth }).png().toBuffer()
-  });
-  variants.push({
-    name: "threshold-150",
-    buffer: await base
-      .resize({ width: targetWidth })
-      .threshold(150)
-      .png()
-      .toBuffer()
-  });
-  variants.push({
-    name: "threshold-175",
-    buffer: await base
-      .resize({ width: targetWidth })
-      .threshold(175)
-      .png()
-      .toBuffer()
-  });
-  variants.push({
-    name: "blur-threshold",
-    buffer: await base
-      .resize({ width: targetWidth })
-      .blur(0.6)
-      .threshold(165)
-      .png()
-      .toBuffer()
+async function recognizeWhole(worker, buffer, label, logger) {
+  await worker.setParameters({
+    tessedit_pageseg_mode: "8",
+    tessedit_char_whitelist: "0123456789",
+    classify_bln_numeric_mode: 1,
+    user_defined_dpi: "300"
   });
 
-  return variants;
+  const {
+    data: { text, confidence }
+  } = await worker.recognize(buffer);
+
+  const digits = normalizeOcrText(text, true);
+  const conf = typeof confidence === "number" ? confidence : 0;
+
+  logger.info("OCR whole image", {
+    variant: label,
+    rawText: String(text || "").trim(),
+    digits,
+    confidence: conf
+  });
+
+  return { label, digits, confidence: conf };
 }
 
-async function splitIntoFourDigitSlices(imageBuffer) {
-  const prepared = sharp(imageBuffer).grayscale().normalize();
-  const { data, info } = await prepared
-    .resize({ width: 560 })
-    .threshold(165)
-    .raw()
-    .toBuffer({ resolveWithObject: true });
+function pickFourDigits(reads, expectedLen) {
+  const priority = [
+    "bin160",
+    "bin162",
+    "bin165",
+    "bin158",
+    "bin168",
+    "bin172",
+    "gray"
+  ];
 
-  const width = info.width;
-  const height = info.height;
-  const colInk = new Array(width).fill(0);
-
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const pixel = data[y * width + x];
-      if (pixel < 128) {
-        colInk[x] += 1;
+  const exact = reads.filter((r) => r.digits.length === expectedLen);
+  if (exact.length) {
+    exact.sort((a, b) => {
+      const pa = priority.indexOf(a.label);
+      const pb = priority.indexOf(b.label);
+      const ra = pa === -1 ? 999 : pa;
+      const rb = pb === -1 ? 999 : pb;
+      if (ra !== rb) {
+        return ra - rb;
       }
+      return b.confidence - a.confidence;
+    });
+    return exact[0].digits;
+  }
+
+  const long = reads.filter((r) => r.digits.length > expectedLen);
+  if (long.length) {
+    long.sort((a, b) => {
+      const pa = priority.indexOf(a.label);
+      const pb = priority.indexOf(b.label);
+      const ra = pa === -1 ? 999 : pa;
+      const rb = pb === -1 ? 999 : pb;
+      if (ra !== rb) {
+        return ra - rb;
+      }
+      return b.confidence - a.confidence;
+    });
+    return long[0].digits.slice(0, expectedLen);
+  }
+
+  return null;
+}
+
+async function recognizeBand(worker, sliceBuf, logger, band, tag) {
+  let best = { digit: "", confidence: -1 };
+
+  for (const psm of ["10", "8"]) {
+    await worker.setParameters({
+      tessedit_pageseg_mode: psm,
+      tessedit_char_whitelist: "0123456789",
+      user_defined_dpi: "300"
+    });
+    const {
+      data: { text, confidence }
+    } = await worker.recognize(sliceBuf);
+    const normalized = normalizeOcrText(text, true).replace(/\D/g, "");
+    const ch = normalized.slice(0, 1) || "";
+    const conf = typeof confidence === "number" ? confidence : 0;
+
+    logger.info("OCR band", {
+      band,
+      tag,
+      psm,
+      rawText: String(text || "").trim(),
+      digit: ch,
+      confidence: conf
+    });
+
+    if (ch && conf >= best.confidence) {
+      best = { digit: ch, confidence: conf };
     }
   }
 
-  const nonEmptyCols = colInk
-    .map((value, idx) => ({ value, idx }))
-    .filter((item) => item.value > 1)
-    .map((item) => item.idx);
+  return best;
+}
 
-  const contentLeft = nonEmptyCols.length ? nonEmptyCols[0] : 0;
-  const contentRight = nonEmptyCols.length ? nonEmptyCols[nonEmptyCols.length - 1] : width - 1;
-  const contentWidth = Math.max(1, contentRight - contentLeft + 1);
-  const digitBandWidth = Math.floor(contentWidth / 4);
-  const overlap = Math.max(6, Math.floor(digitBandWidth * 0.12));
+async function overlapFourBandsDetailed(worker, basePng, threshold, logger) {
+  const bin = await sharp(basePng)
+    .grayscale()
+    .normalize()
+    .resize({ width: UPSCALE_WIDTH })
+    .median(3)
+    .threshold(threshold)
+    .png()
+    .toBuffer();
 
-  const slices = [];
+  const { width, height } = await sharp(bin).metadata();
+  const seg = width / 4;
+  const overlap = Math.max(12, Math.floor(seg * 0.3));
+
+  const tag = `bands-${threshold}`;
+  const cells = [];
+
   for (let i = 0; i < 4; i += 1) {
-    const left = Math.max(0, contentLeft + i * digitBandWidth - overlap);
-    const nominalRight =
-      i === 3 ? contentRight : contentLeft + (i + 1) * digitBandWidth - 1 + overlap;
-    const right = Math.min(width - 1, nominalRight);
-    const sliceWidth = Math.max(1, right - left + 1);
+    const lo = Math.floor(i * seg);
+    const hi = Math.floor((i + 1) * seg) - 1;
+    const left = Math.max(0, lo - overlap);
+    const right = Math.min(width - 1, hi + overlap);
+    const sliceW = Math.max(1, right - left + 1);
 
-    const buffer = await sharp(imageBuffer)
-      .grayscale()
-      .normalize()
-      .resize({ width: 560 })
-      .extract({ left, top: 0, width: sliceWidth, height })
-      .threshold(165)
+    const sliceBuf = await sharp(bin)
+      .extract({ left, top: 0, width: sliceW, height })
+      .resize({
+        height: 160,
+        kernel: sharp.kernel.lanczos3,
+        fit: "inside",
+        withoutEnlargement: false
+      })
+      .extend({
+        top: 14,
+        bottom: 14,
+        left: 14,
+        right: 14,
+        background: { r: 255, g: 255, b: 255 }
+      })
       .png()
       .toBuffer();
 
-    slices.push({ index: i, left, right, buffer });
+    cells.push(await recognizeBand(worker, sliceBuf, logger, i, tag));
   }
 
-  return slices;
+  return cells;
 }
 
-async function solveBySegmentingDigits(imageBuffer, worker, config, logger) {
-  const slices = await splitIntoFourDigitSlices(imageBuffer);
-  const digitPsmModes = [10, 13, 8];
-  let solved = "";
+function mergeBandCells(perThresholdCells) {
+  const merged = [
+    { digit: "", confidence: -1 },
+    { digit: "", confidence: -1 },
+    { digit: "", confidence: -1 },
+    { digit: "", confidence: -1 }
+  ];
 
-  for (const slice of slices) {
-    let bestDigit = "";
-    for (const psm of digitPsmModes) {
-      await worker.setParameters({ tessedit_pageseg_mode: psm });
-      const {
-        data: { text }
-      } = await worker.recognize(slice.buffer);
-      const normalized = normalizeOcrText(text, config.captcha.ocrNumericOnly);
-      const singleDigit = normalized[0] || "";
-
-      logger.info("OCR segmented digit attempt", {
-        digitIndex: slice.index,
-        psm,
-        rawText: String(text || "").trim(),
-        normalized
-      });
-
-      if (/^\d$/.test(singleDigit)) {
-        bestDigit = singleDigit;
-        break;
+  for (const cells of perThresholdCells) {
+    for (let i = 0; i < 4; i += 1) {
+      const { digit, confidence } = cells[i];
+      if (digit && confidence >= merged[i].confidence) {
+        merged[i] = { digit, confidence };
       }
     }
-
-    solved += bestDigit;
   }
 
-  if (solved.length !== 4 || !/^\d{4}$/.test(solved)) {
-    throw new Error("Segmented OCR could not extract exactly 4 digits");
+  return merged.map((x) => x.digit).join("");
+}
+
+async function bandsFirstCompleteString(worker, basePng, logger) {
+  for (const th of [162, 165, 160, 158, 156, 168, 172]) {
+    const cells = await overlapFourBandsDetailed(worker, basePng, th, logger);
+    const s = cells.map((c) => c.digit).join("");
+    if (s.length === 4 && /^\d{4}$/.test(s)) {
+      return s;
+    }
   }
 
-  logger.info("CAPTCHA solved with segmented OCR", { solved });
-  return solved;
+  return null;
 }
 
 async function solveCaptchaWithOCR(imageBuffer, config, logger) {
+  const expectedLen = config.captcha.ocrExpectedLength;
   const worker = await createWorker(config.captcha.ocrLanguage);
 
   try {
-    if (config.captcha.ocrNumericOnly) {
-      await worker.setParameters({
-        tessedit_char_whitelist: "0123456789",
-        classify_bln_numeric_mode: 1
-      });
-    }
+    const base = await paddedSource(imageBuffer);
 
-    const psmModes = [8, 7, 13, 11, 6];
-    const attempts = Math.max(1, config.captcha.ocrMaxAttempts);
-    const imageVariants = await buildImageVariants(imageBuffer);
-    let bestCandidate = "";
-    let bestScore = -1;
-    const candidates = [];
+    const gray = await sharp(base)
+      .grayscale()
+      .normalize()
+      .resize({ width: UPSCALE_WIDTH })
+      .png()
+      .toBuffer();
 
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      const psm = psmModes[(attempt - 1) % psmModes.length];
-      const variant = imageVariants[(attempt - 1) % imageVariants.length];
-      await worker.setParameters({ tessedit_pageseg_mode: psm });
+    const mkBin = (t) =>
+      sharp(base)
+        .grayscale()
+        .normalize()
+        .resize({ width: UPSCALE_WIDTH })
+        .median(3)
+        .threshold(t)
+        .png()
+        .toBuffer();
 
-      const {
-        data: { text }
-      } = await worker.recognize(variant.buffer);
+    const reads = [];
+    reads.push(await recognizeWhole(worker, gray, "gray", logger));
+    reads.push(await recognizeWhole(worker, await mkBin(158), "bin158", logger));
+    reads.push(await recognizeWhole(worker, await mkBin(160), "bin160", logger));
+    reads.push(await recognizeWhole(worker, await mkBin(162), "bin162", logger));
+    reads.push(await recognizeWhole(worker, await mkBin(165), "bin165", logger));
+    reads.push(await recognizeWhole(worker, await mkBin(168), "bin168", logger));
+    reads.push(await recognizeWhole(worker, await mkBin(172), "bin172", logger));
 
-      const normalized = normalizeOcrText(text, config.captcha.ocrNumericOnly);
-      const score = scoreCandidate(normalized, config.captcha.ocrExpectedLength);
-      const candidate = {
-        attempt,
-        psm,
-        variant: variant.name,
-        rawText: String(text || "").trim(),
-        normalized,
-        score
-      };
-      candidates.push(candidate);
+    let code = pickFourDigits(reads, expectedLen);
 
-      logger.info("OCR attempt finished", {
-        attempt,
-        psm,
-        variant: variant.name,
-        rawText: String(text || "").trim(),
-        normalized,
-        score
-      });
+    if (!code || code.length !== expectedLen) {
+      logger.info("Whole-image OCR inconclusive; overlapping bands");
 
-      if (score > bestScore) {
-        bestScore = score;
-        bestCandidate = normalized;
+      code = await bandsFirstCompleteString(worker, base, logger);
+
+      if (!code) {
+        const bandRuns = [];
+        for (const th of [156, 160, 162, 165, 168, 172]) {
+          bandRuns.push(await overlapFourBandsDetailed(worker, base, th, logger));
+        }
+
+        code = mergeBandCells(bandRuns);
       }
 
-      if (normalized.length >= config.captcha.ocrExpectedLength) {
-        break;
-      }
-    }
-
-    const exactLengthCandidate = candidates
-      .filter((item) => item.normalized.length === config.captcha.ocrExpectedLength)
-      .sort((a, b) => b.score - a.score)[0];
-    if (exactLengthCandidate) {
-      bestCandidate = exactLengthCandidate.normalized;
-      bestScore = exactLengthCandidate.score;
-    }
-
-    const hasExactLength = bestCandidate.length === config.captcha.ocrExpectedLength;
-    if (!bestCandidate || bestCandidate.length < config.captcha.ocrMinLength || !hasExactLength) {
-      try {
-        const segmentedValue = await solveBySegmentingDigits(
-          imageBuffer,
-          worker,
-          config,
-          logger
-        );
-        return segmentedValue;
-      } catch (segmentationError) {
-        logger.warn("Segmented OCR fallback failed", {
-          error: segmentationError.message
-        });
+      if (code.length !== expectedLen || !/^\d{4}$/.test(code)) {
         throw new Error(
-          `OCR result invalid (expectedLength=${config.captcha.ocrExpectedLength}, minLength=${config.captcha.ocrMinLength})`
+          `OCR could not read ${expectedLen} digits (got "${code}")`
         );
       }
     }
 
-    logger.info("CAPTCHA solved with OCR", {
-      valueLength: bestCandidate.length,
-      score: bestScore
-    });
-    return bestCandidate;
+    logger.info("CAPTCHA OCR result", { code });
+    return code;
   } finally {
     await worker.terminate();
   }

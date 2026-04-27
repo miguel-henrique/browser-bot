@@ -77,17 +77,26 @@ const config = {
   captcha: {
     enabled: toBoolean(getEnv("ENABLE_CAPTCHA", { defaultValue: "true" }), true),
     provider: getEnv("CAPTCHA_PROVIDER", { defaultValue: "ocr" }),
+    maxSubmitAttempts: toNumber(
+      getEnv("CAPTCHA_SUBMIT_MAX_ATTEMPTS", { defaultValue: "8" }),
+      8
+    ),
     ocrLanguage: getEnv("OCR_LANGUAGE", { defaultValue: "eng" }),
     ocrNumericOnly: toBoolean(getEnv("OCR_NUMERIC_ONLY", { defaultValue: "true" }), true),
     ocrExpectedLength: toNumber(getEnv("OCR_EXPECTED_LENGTH", { defaultValue: "4" }), 4),
     ocrMinLength: toNumber(getEnv("OCR_MIN_LENGTH", { defaultValue: "3" }), 3),
     ocrMaxAttempts: toNumber(getEnv("OCR_MAX_ATTEMPTS", { defaultValue: "10" }), 10),
+    manualFallbackEnabled: toBoolean(
+      getEnv("CAPTCHA_MANUAL_FALLBACK", { defaultValue: "false" }),
+      false
+    ),
     apiUrl: getEnv("CAPTCHA_API_URL", { defaultValue: "" }),
     apiKey: getEnv("CAPTCHA_API_KEY", { defaultValue: "" }),
     apiTimeoutMs: toNumber(
       getEnv("CAPTCHA_API_TIMEOUT_MS", { defaultValue: "30000" }),
       30000
-    )
+    ),
+    submitDelayMs: toNumber(getEnv("CAPTCHA_SUBMIT_DELAY_MS", { defaultValue: "1500" }), 1500)
   },
   runtime: {
     screenshotDir: path.resolve(
