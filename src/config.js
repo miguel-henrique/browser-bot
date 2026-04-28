@@ -47,6 +47,14 @@ function parseDateList(value) {
     .filter((item) => /^\d{2}\/\d{2}\/\d{4}$/.test(item));
 }
 
+function parseCaptchaMode(value) {
+  const normalized = String(value ?? "auto").trim().toLowerCase();
+  if (normalized === "auto" || normalized === "telegram") {
+    return normalized;
+  }
+  return "auto";
+}
+
 function selectorEnv(name, defaultValue) {
   const value = getEnv(name, { defaultValue });
   // dotenv treats '#' as comment delimiter when values are not quoted.
@@ -100,6 +108,7 @@ const config = {
   },
   captcha: {
     enabled: toBoolean(getEnv("ENABLE_CAPTCHA", { defaultValue: "true" }), true),
+    mode: parseCaptchaMode(getEnv("CAPTCHA_MODE", { defaultValue: "auto" })),
     provider: getEnv("CAPTCHA_PROVIDER", { defaultValue: "ocr" }),
     maxSubmitAttempts: toNumber(
       getEnv("CAPTCHA_SUBMIT_MAX_ATTEMPTS", { defaultValue: "1" }),
@@ -110,10 +119,6 @@ const config = {
     ocrExpectedLength: toNumber(getEnv("OCR_EXPECTED_LENGTH", { defaultValue: "4" }), 4),
     ocrMinLength: toNumber(getEnv("OCR_MIN_LENGTH", { defaultValue: "3" }), 3),
     ocrMaxAttempts: toNumber(getEnv("OCR_MAX_ATTEMPTS", { defaultValue: "10" }), 10),
-    manualFallbackEnabled: toBoolean(
-      getEnv("CAPTCHA_MANUAL_FALLBACK", { defaultValue: "false" }),
-      false
-    ),
     apiUrl: getEnv("CAPTCHA_API_URL", { defaultValue: "" }),
     apiKey: getEnv("CAPTCHA_API_KEY", { defaultValue: "" }),
     apiTimeoutMs: toNumber(

@@ -1,14 +1,19 @@
 const { solveCaptchaWithOCR } = require("./ocrSolver");
 const { solveCaptchaWithApi } = require("./apiSolver");
-const { solveCaptchaManually } = require("./manualSolver");
 const { solveCaptchaWithTelegram } = require("./telegramSolver");
 
 async function solveCaptcha(imageBuffer, config, logger) {
-  const provider = config.captcha.provider;
-
-  if (provider === "manual") {
-    return solveCaptchaManually(config, logger);
+  if (config.captcha.mode === "telegram") {
+    if (!config.notifications.telegramEnabled) {
+      throw new Error(
+        "CAPTCHA_MODE=telegram requires TELEGRAM_FALLBACK_ENABLED=true with Telegram credentials configured"
+      );
+    }
+    logger.warn("CAPTCHA mode is telegram; skipping OCR and requesting user input via Telegram");
+    return solveCaptchaWithTelegram(imageBuffer, config, logger);
   }
+
+  const provider = config.captcha.provider;
 
   if (provider === "api") {
     return solveCaptchaWithApi(imageBuffer, config, logger);
@@ -23,12 +28,6 @@ async function solveCaptcha(imageBuffer, config, logger) {
           error: error.message
         });
         return solveCaptchaWithTelegram(imageBuffer, config, logger);
-      }
-      if (config.captcha.manualFallbackEnabled) {
-        logger.warn("OCR failed; falling back to manual CAPTCHA", {
-          error: error.message
-        });
-        return solveCaptchaManually(config, logger);
       }
       throw error;
     }

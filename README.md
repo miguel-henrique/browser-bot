@@ -7,9 +7,8 @@ Scheduled Node.js browser automation using Puppeteer (Chromium), with OCR CAPTCH
 - Weekday scheduler with `.env`-defined times (`SCHEDULE_TIMES`) in your timezone.
 - Manual skip dates via `.env` (`SKIP_DATES`) for holidays, leave, or custom off days.
 - CAPTCHA flow:
-  - OCR first
-  - optional Telegram fallback (send captcha image to your phone, reply with code)
-  - optional terminal manual fallback
+  - `CAPTCHA_MODE=auto`: OCR first, Telegram fallback only if needed
+  - `CAPTCHA_MODE=telegram`: always asks you on Telegram (no OCR)
 - Conservative defaults to reduce lockout risk:
   - `MAX_RUN_ATTEMPTS=1`
   - `CAPTCHA_SUBMIT_MAX_ATTEMPTS=1`
@@ -92,10 +91,10 @@ kill "$(cat bot.pid)"
 ## CAPTCHA Notes
 
 - Use `ENABLE_CAPTCHA=true|false` to toggle CAPTCHA handling.
-- Choose provider using `CAPTCHA_PROVIDER=ocr|api|manual`.
+- Choose mode using `CAPTCHA_MODE=auto|telegram`.
+- Choose provider using `CAPTCHA_PROVIDER=ocr|api` (used in `auto` mode).
 - If OCR fails and `TELEGRAM_FALLBACK_ENABLED=true`, bot sends the captcha image to Telegram and waits for your reply.
 - If OCR returns a wrong code and the site rejects it, Telegram rescue is also attempted on the final captcha attempt.
-- Optional safety valve: set `CAPTCHA_MANUAL_FALLBACK=true` to prompt in terminal when OCR fails and Telegram fallback is off.
 - `CAPTCHA_SUBMIT_MAX_ATTEMPTS` controls retries inside one login run (recommended: `1` to avoid LDAP lockouts).
 - External API solving should only be enabled in approved/legal environments.
 - OCR options:
@@ -122,6 +121,17 @@ TELEGRAM_CHAT_ID=<YOUR_CHAT_ID>
 ```
 
 When OCR fails, you receive the captcha image in Telegram. Reply with the 4-digit code; the automation uses your reply.
+
+### Testing Telegram-only flow
+
+To test only the Telegram path (without forcing OCR errors), use:
+
+```env
+CAPTCHA_MODE=telegram
+TELEGRAM_FALLBACK_ENABLED=true
+```
+
+Then run `npm run run:once`.
 
 ## Login Success Detection
 
