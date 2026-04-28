@@ -108,7 +108,7 @@ async function notifySuccess(configObj, logger) {
   const next = getNextExecutionInfo(configObj, now);
 
   const nextLine = next
-    ? `Next execution at Date and Time ${next.time} ${next.date}`
+    ? `Next execution at ${next.time} ${next.date}`
     : "Next execution at Date and Time unavailable";
 
   const text = `Success! ${formatModeLabel(configObj.captcha.mode)} mode at ${currentStamp}\n${nextLine}`;
