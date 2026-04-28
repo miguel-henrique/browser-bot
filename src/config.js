@@ -52,7 +52,20 @@ function parseCaptchaMode(value) {
   if (normalized === "auto" || normalized === "telegram") {
     return normalized;
   }
+  // Helps with accidental values like "auto|telegram".
+  if (normalized.includes("|")) {
+    const first = normalized.split("|")[0].trim();
+    if (first === "auto" || first === "telegram") {
+      return first;
+    }
+  }
   return "auto";
+}
+
+function parseOcrLanguage(value) {
+  const normalized = String(value ?? "eng").trim().toLowerCase();
+  // This project ships/uses English trained data. Fallback prevents crashes from invalid values.
+  return normalized === "eng" ? normalized : "eng";
 }
 
 function selectorEnv(name, defaultValue) {
@@ -114,7 +127,7 @@ const config = {
       getEnv("CAPTCHA_SUBMIT_MAX_ATTEMPTS", { defaultValue: "1" }),
       1
     ),
-    ocrLanguage: getEnv("OCR_LANGUAGE", { defaultValue: "eng" }),
+    ocrLanguage: parseOcrLanguage(getEnv("OCR_LANGUAGE", { defaultValue: "eng" })),
     ocrNumericOnly: toBoolean(getEnv("OCR_NUMERIC_ONLY", { defaultValue: "true" }), true),
     ocrExpectedLength: toNumber(getEnv("OCR_EXPECTED_LENGTH", { defaultValue: "4" }), 4),
     ocrMinLength: toNumber(getEnv("OCR_MIN_LENGTH", { defaultValue: "3" }), 3),
