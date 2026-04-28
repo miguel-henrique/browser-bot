@@ -24,6 +24,26 @@ async function telegramRequest(config, method, payload, logger) {
   return data.result;
 }
 
+async function sendTelegramMessage(config, text, logger) {
+  if (!config.notifications.telegramEnabled) {
+    return false;
+  }
+  const chatId = config.notifications.telegramChatId;
+  if (!config.notifications.telegramBotToken || !chatId) {
+    throw new Error("Telegram notifications require TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID");
+  }
+  await telegramRequest(
+    config,
+    "sendMessage",
+    {
+      chat_id: chatId,
+      text
+    },
+    logger
+  );
+  return true;
+}
+
 async function telegramSendPhotoBuffer(config, chatId, imageBuffer, caption, logger) {
   const token = config.notifications.telegramBotToken;
   const url = `https://api.telegram.org/bot${token}/sendPhoto`;
@@ -66,28 +86,17 @@ async function solveCaptchaWithTelegram(imageBuffer, config, logger) {
   }
 
   await fs.mkdir(config.runtime.screenshotDir, { recursive: true });
-  const fallbackName = `captcha-fallback-${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
-  const fallbackPath = path.join(config.runtime.screenshotDir, fallbackName);
-  await fs.writeFile(fallbackPath, imageBuffer);
+  if (config.runtime.captureScreenshots) {
+    const fallbackName = `captcha-fallback-${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
+    const fallbackPath = path.join(config.runtime.screenshotDir, fallbackName);
+    await fs.writeFile(fallbackPath, imageBuffer);
+  }
 
   await telegramSendPhotoBuffer(
     config,
     chatId,
     imageBuffer,
-    [
-      "Browser bot could not solve CAPTCHA.",
-      `Reply with the ${expectedLength}-digit code only.`
-    ].join("\n"),
-    logger
-  );
-
-  await telegramRequest(
-    config,
-    "sendMessage",
-    {
-      chat_id: chatId,
-      text: "Waiting for your reply..."
-    },
+    "Enter Code",
     logger
   );
 
@@ -126,7 +135,7 @@ async function solveCaptchaWithTelegram(imageBuffer, config, logger) {
           await telegramRequest(
             config,
             "sendMessage",
-            { chat_id: chatId, text: `Received code: ${parsed}. Continuing automation.` },
+            { chat_id: chatId, text: `Received code: ${parsed}.` },
             logger
           );
           return parsed;
@@ -138,4 +147,4 @@ async function solveCaptchaWithTelegram(imageBuffer, config, logger) {
   throw new Error(`Telegram fallback timed out after ${timeoutMs}ms`);
 }
 
-module.exports = { solveCaptchaWithTelegram };
+module.exports = { solveCaptchaWithTelegram, sendTelegramMessage };

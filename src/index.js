@@ -3,6 +3,7 @@ const config = require("./config");
 const { createLogger } = require("./logger");
 const { withRetry } = require("./utils/retry");
 const { runLoginWorkflow } = require("./automation/loginWorkflow");
+const { sendTelegramMessage } = require("./captcha/telegramSolver");
 
 const logger = createLogger(config.runtime.logLevel);
 
@@ -31,6 +32,89 @@ function buildCronExpressions(times) {
   });
 }
 
+function getZonedParts(date, timezone) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    weekday: "short"
+  }).formatToParts(date);
+  const obj = {};
+  for (const p of parts) {
+    if (p.type !== "literal") {
+      obj[p.type] = p.value;
+    }
+  }
+  return obj;
+}
+
+function addDays(date, days) {
+  return new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
+}
+
+function isWeekdayShort(weekday) {
+  return ["Mon", "Tue", "Wed", "Thu", "Fri"].includes(weekday);
+}
+
+function getNextExecutionInfo(configObj, fromDate = new Date()) {
+  const timezone = configObj.runtime.timezone;
+  const scheduleTimes = [...configObj.runtime.scheduleTimes].sort();
+  const nowParts = getZonedParts(fromDate, timezone);
+  const nowHm = `${nowParts.hour}:${nowParts.minute}`;
+
+  for (let offset = 0; offset <= 366; offset += 1) {
+    const candidate = addDays(fromDate, offset);
+    const p = getZonedParts(candidate, timezone);
+    const ddmmyyyy = `${p.day}/${p.month}/${p.year}`;
+    if (!isWeekdayShort(p.weekday)) {
+      continue;
+    }
+    if (configObj.runtime.skipDates.includes(ddmmyyyy)) {
+      continue;
+    }
+
+    for (const hm of scheduleTimes) {
+      if (offset === 0 && hm <= nowHm) {
+        continue;
+      }
+      return {
+        time: hm,
+        date: ddmmyyyy
+      };
+    }
+  }
+
+  return null;
+}
+
+function formatModeLabel(mode) {
+  return mode === "telegram" ? "Telegram Mode" : "Auto Mode";
+}
+
+async function notifySuccess(configObj, logger) {
+  if (!configObj.notifications.telegramEnabled) {
+    return;
+  }
+
+  const now = new Date();
+  const current = getZonedParts(now, configObj.runtime.timezone);
+  const currentStamp = `${current.hour}:${current.minute} ${current.day}/${current.month}/${current.year.slice(
+    -2
+  )}`;
+  const next = getNextExecutionInfo(configObj, now);
+
+  const nextLine = next
+    ? `Next execution at Date and Time ${next.time} ${next.date}`
+    : "Next execution at Date and Time unavailable";
+
+  const text = `Success! ${formatModeLabel(configObj.captcha.mode)} mode at ${currentStamp}\n${nextLine}`;
+  await sendTelegramMessage(configObj, text, logger);
+}
+
 async function executeScheduledRun(trigger) {
   if (trigger === "cron" && shouldSkipToday(config)) {
     logger.info("Skipping scheduled run (date is in SKIP_DATES)", {
@@ -41,11 +125,11 @@ async function executeScheduledRun(trigger) {
   }
 
   const startedAt = new Date().toISOString();
-  logger.info("Starting automation run", { trigger, startedAt });
+  logger.info("Run started", { trigger, startedAt, mode: config.captcha.mode });
 
   await withRetry(
     async (attempt) => {
-      logger.info("Workflow attempt started", { attempt });
+      logger.info("Attempt started", { attempt });
       await runLoginWorkflow(config, logger);
     },
     {
@@ -57,6 +141,11 @@ async function executeScheduledRun(trigger) {
   );
 
   logger.info("Automation run completed", { trigger });
+  try {
+    await notifySuccess(config, logger);
+  } catch (notifyError) {
+    logger.warn("Success Telegram notification failed", { error: notifyError.message });
+  }
 }
 
 function registerSchedule() {
@@ -98,7 +187,10 @@ async function bootstrap() {
   }
 
   registerSchedule();
-  logger.info("Scheduler is active and waiting for next run");
+  const next = getNextExecutionInfo(config);
+  logger.info("Scheduler is active and waiting for next run", {
+    next
+  });
 }
 
 process.on("unhandledRejection", (reason) => {

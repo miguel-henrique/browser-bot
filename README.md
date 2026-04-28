@@ -13,6 +13,7 @@ Scheduled Node.js browser automation using Puppeteer (Chromium), with OCR CAPTCH
   - `MAX_RUN_ATTEMPTS=1`
   - `CAPTCHA_SUBMIT_MAX_ATTEMPTS=1`
 - Structured logs and screenshot artifacts for debugging.
+  - screenshot capture can be disabled via `CAPTURE_SCREENSHOTS=false`
 
 ## Requirements
 
@@ -120,7 +121,9 @@ TELEGRAM_BOT_TOKEN=<YOUR_TOKEN>
 TELEGRAM_CHAT_ID=<YOUR_CHAT_ID>
 ```
 
-When OCR fails, you receive the captcha image in Telegram. Reply with the 4-digit code; the automation uses your reply.
+When OCR fails (or when `CAPTCHA_MODE=telegram`), you receive the captcha image in Telegram with caption `Enter Code`.  
+Reply with the 4-digit code and you receive `Received code: XXXX.`.  
+After a successful run, the bot also sends execution success + next scheduled execution info.
 
 ### Testing Telegram-only flow
 
@@ -151,7 +154,7 @@ You can also configure `LOGIN_ERROR_SELECTOR` and `LOGIN_SETTLE_WAIT_MS` to impr
 
 ## Artifacts
 
-- Screenshots are saved in `SCREENSHOT_DIR` (default: `./artifacts/screenshots`).
+- Screenshots are saved in `SCREENSHOT_DIR` (default: `./artifacts/screenshots`) when `CAPTURE_SCREENSHOTS=true`.
 
 ## Running Location: PC vs Server
 

@@ -133,6 +133,7 @@ const config = {
     ),
     logLevel: getEnv("LOG_LEVEL", { defaultValue: "info" }),
     debugLogValues: toBoolean(getEnv("DEBUG_LOG_VALUES", { defaultValue: "false" }), false),
+    captureScreenshots: toBoolean(getEnv("CAPTURE_SCREENSHOTS", { defaultValue: "true" }), true),
     timezone: getEnv("TIMEZONE", { defaultValue: "America/Sao_Paulo" }),
     runOnce: toBoolean(getEnv("RUN_ONCE", { defaultValue: "false" }), false),
     scheduleTimes: parseTimeList(

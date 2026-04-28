@@ -14,6 +14,9 @@ async function ensureDirExists(dirPath) {
 }
 
 async function capture(page, config, runId, stage) {
+  if (!config.runtime.captureScreenshots) {
+    return null;
+  }
   await ensureDirExists(config.runtime.screenshotDir);
   const filePath = path.join(config.runtime.screenshotDir, `${runId}-${stage}.png`);
   await page.screenshot({ path: filePath, fullPage: true });
@@ -185,7 +188,7 @@ async function attemptTelegramCaptchaRescue(page, config, logger, runId) {
     return false;
   }
 
-  logger.warn("Attempting Telegram CAPTCHA rescue");
+  logger.warn("CAPTCHA rescue: requesting code from Telegram");
   await page.waitForSelector(config.selectors.captchaImage, {
     timeout: 20000,
     visible: true
@@ -197,13 +200,17 @@ async function attemptTelegramCaptchaRescue(page, config, logger, runId) {
   }
 
   const imageBuffer = await captchaElement.screenshot({ encoding: "binary" });
-  await ensureDirExists(config.runtime.screenshotDir);
-  const rescueShot = path.join(
-    config.runtime.screenshotDir,
-    `${runId}-telegram-rescue-captcha.png`
-  );
-  await fs.writeFile(rescueShot, imageBuffer);
-  logger.info("Telegram rescue CAPTCHA image captured", { screenshot: rescueShot });
+  if (config.runtime.captureScreenshots) {
+    await ensureDirExists(config.runtime.screenshotDir);
+    const rescueShot = path.join(
+      config.runtime.screenshotDir,
+      `${runId}-telegram-rescue-captcha.png`
+    );
+    await fs.writeFile(rescueShot, imageBuffer);
+    logger.info("CAPTCHA rescue: local image saved", { screenshot: rescueShot });
+  } else {
+    logger.info("CAPTCHA rescue: local image capture disabled by config");
+  }
 
   const rescuedCaptcha = await solveCaptchaWithTelegram(imageBuffer, config, logger);
   console.log("[CAPTCHA] Telegram provided code:", rescuedCaptcha);
@@ -226,11 +233,15 @@ async function attemptTelegramCaptchaRescue(page, config, logger, runId) {
 
   await page.waitForSelector(config.selectors.submit, { timeout: 10000, visible: true });
   await page.click(config.selectors.submit);
-  logger.info("Submitted login form with Telegram CAPTCHA rescue");
+  logger.info("CAPTCHA rescue: submitted login form with Telegram code");
 
   await validateLoginSuccess(page, config, logger);
   const successShot = await capture(page, config, runId, "telegram-rescue-success");
-  logger.info("Workflow completed with Telegram CAPTCHA rescue", { screenshot: successShot });
+  if (successShot) {
+    logger.info("Workflow completed with Telegram CAPTCHA rescue", { screenshot: successShot });
+  } else {
+    logger.info("Workflow completed with Telegram CAPTCHA rescue");
+  }
   return true;
 }
 
@@ -240,7 +251,7 @@ async function runLoginWorkflow(config, logger) {
   let activePage;
 
   try {
-    logger.info("Launching browser", {
+    logger.info("Step 1/5: launching browser", {
       headless: config.browser.headless,
       ignoreHTTPSErrors: config.browser.ignoreHTTPSErrors
     });
@@ -261,11 +272,11 @@ async function runLoginWorkflow(config, logger) {
       timeout: config.browser.navigationTimeoutMs
     });
 
-    logger.info("Loaded login page", { url: page.url() });
+    logger.info("Step 2/5: login page loaded", { url: page.url() });
 
     const totalCaptchaAttempts = Math.max(1, config.captcha.maxSubmitAttempts);
     for (let captchaAttempt = 1; captchaAttempt <= totalCaptchaAttempts; captchaAttempt += 1) {
-      logger.info("Starting captcha submit attempt", {
+      logger.info("Step 3/5: preparing login form and captcha", {
         captchaAttempt,
         totalCaptchaAttempts
       });
@@ -294,7 +305,7 @@ async function runLoginWorkflow(config, logger) {
       }
 
       if (config.captcha.enabled) {
-        logger.info("CAPTCHA enabled; waiting for image");
+        logger.info("CAPTCHA enabled; waiting for image element");
         await page.waitForSelector(config.selectors.captchaImage, {
           timeout: 20000,
           visible: true
@@ -312,13 +323,17 @@ async function runLoginWorkflow(config, logger) {
         }
 
         const imageBuffer = await captchaElement.screenshot({ encoding: "binary" });
-        await ensureDirExists(config.runtime.screenshotDir);
-        const captchaShot = path.join(
-          config.runtime.screenshotDir,
-          `${runId}-attempt-${captchaAttempt}-captcha.png`
-        );
-        await fs.writeFile(captchaShot, imageBuffer);
-        logger.info("CAPTCHA image captured", { screenshot: captchaShot });
+        if (config.runtime.captureScreenshots) {
+          await ensureDirExists(config.runtime.screenshotDir);
+          const captchaShot = path.join(
+            config.runtime.screenshotDir,
+            `${runId}-attempt-${captchaAttempt}-captcha.png`
+          );
+          await fs.writeFile(captchaShot, imageBuffer);
+          logger.info("CAPTCHA image captured", { screenshot: captchaShot });
+        } else {
+          logger.info("CAPTCHA image captured in memory (local screenshot disabled)");
+        }
         const solvedCaptcha = await solveCaptcha(imageBuffer, config, logger);
 
         console.log("[CAPTCHA] Resolved code:", solvedCaptcha);
@@ -354,7 +369,9 @@ async function runLoginWorkflow(config, logger) {
         }
 
         const preSubmitShot = await capture(page, config, runId, `attempt-${captchaAttempt}-pre-submit`);
-        logger.info("Pre-submit screenshot captured", { screenshot: preSubmitShot });
+        if (preSubmitShot) {
+          logger.info("Pre-submit screenshot captured", { screenshot: preSubmitShot });
+        }
 
         if (config.runtime.debugLogValues) {
           logger.info("CAPTCHA debug values", {
@@ -378,12 +395,16 @@ async function runLoginWorkflow(config, logger) {
 
       await page.waitForSelector(config.selectors.submit, { timeout: 10000, visible: true });
       await page.click(config.selectors.submit);
-      logger.info("Submitted login form");
+      logger.info("Step 4/5: login form submitted");
 
       try {
         await validateLoginSuccess(page, config, logger);
         const successShot = await capture(page, config, runId, "success");
-        logger.info("Workflow completed successfully", { screenshot: successShot });
+        if (successShot) {
+          logger.info("Step 5/5: workflow completed successfully", { screenshot: successShot });
+        } else {
+          logger.info("Step 5/5: workflow completed successfully");
+        }
         return;
       } catch (error) {
         if (isRetryableCaptchaError(error) && captchaAttempt >= totalCaptchaAttempts) {
@@ -427,7 +448,9 @@ async function runLoginWorkflow(config, logger) {
     if (browser && activePage) {
       try {
         const failShot = await capture(activePage, config, runId, "failure");
-        logger.info("Failure screenshot captured", { screenshot: failShot });
+        if (failShot) {
+          logger.info("Failure screenshot captured", { screenshot: failShot });
+        }
       } catch (captureError) {
         logger.warn("Could not capture failure screenshot", {
           error: captureError.message
