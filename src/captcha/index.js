@@ -1,6 +1,7 @@
 const { solveCaptchaWithOCR } = require("./ocrSolver");
 const { solveCaptchaWithApi } = require("./apiSolver");
 const { solveCaptchaManually } = require("./manualSolver");
+const { solveCaptchaWithTelegram } = require("./telegramSolver");
 
 async function solveCaptcha(imageBuffer, config, logger) {
   const provider = config.captcha.provider;
@@ -17,13 +18,19 @@ async function solveCaptcha(imageBuffer, config, logger) {
     try {
       return await solveCaptchaWithOCR(imageBuffer, config, logger);
     } catch (error) {
-      if (!config.captcha.manualFallbackEnabled) {
-        throw error;
+      if (config.notifications.telegramEnabled) {
+        logger.warn("OCR failed; falling back to Telegram CAPTCHA prompt", {
+          error: error.message
+        });
+        return solveCaptchaWithTelegram(imageBuffer, config, logger);
       }
-      logger.warn("OCR failed; falling back to manual CAPTCHA", {
-        error: error.message
-      });
-      return solveCaptchaManually(config, logger);
+      if (config.captcha.manualFallbackEnabled) {
+        logger.warn("OCR failed; falling back to manual CAPTCHA", {
+          error: error.message
+        });
+        return solveCaptchaManually(config, logger);
+      }
+      throw error;
     }
   }
 

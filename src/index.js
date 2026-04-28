@@ -5,9 +5,41 @@ const { withRetry } = require("./utils/retry");
 const { runLoginWorkflow } = require("./automation/loginWorkflow");
 
 const logger = createLogger(config.runtime.logLevel);
-const CRON_EXPRESSION = "0 7,12,13,16 * * *";
+
+function toDdMmYyyy(date, timezone) {
+  const parts = new Intl.DateTimeFormat("pt-BR", {
+    timeZone: timezone,
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric"
+  }).formatToParts(date);
+  const day = parts.find((p) => p.type === "day")?.value || "01";
+  const month = parts.find((p) => p.type === "month")?.value || "01";
+  const year = parts.find((p) => p.type === "year")?.value || "1970";
+  return `${day}/${month}/${year}`;
+}
+
+function shouldSkipToday(configObj) {
+  const today = toDdMmYyyy(new Date(), configObj.runtime.timezone);
+  return configObj.runtime.skipDates.includes(today);
+}
+
+function buildCronExpressions(times) {
+  return times.map((time) => {
+    const [hour, minute] = time.split(":");
+    return `${Number(minute)} ${Number(hour)} * * 1-5`;
+  });
+}
 
 async function executeScheduledRun(trigger) {
+  if (trigger === "cron" && shouldSkipToday(config)) {
+    logger.info("Skipping scheduled run (date is in SKIP_DATES)", {
+      trigger,
+      date: toDdMmYyyy(new Date(), config.runtime.timezone)
+    });
+    return;
+  }
+
   const startedAt = new Date().toISOString();
   logger.info("Starting automation run", { trigger, startedAt });
 
@@ -28,22 +60,27 @@ async function executeScheduledRun(trigger) {
 }
 
 function registerSchedule() {
-  cron.schedule(
-    CRON_EXPRESSION,
-    async () => {
-      try {
-        await executeScheduledRun("cron");
-      } catch (error) {
-        logger.error("Scheduled run failed after retries", { error: error.message });
+  const cronExpressions = buildCronExpressions(config.runtime.scheduleTimes);
+
+  for (const expression of cronExpressions) {
+    cron.schedule(
+      expression,
+      async () => {
+        try {
+          await executeScheduledRun("cron");
+        } catch (error) {
+          logger.error("Scheduled run failed after retries", { error: error.message });
+        }
+      },
+      {
+        timezone: config.runtime.timezone
       }
-    },
-    {
-      timezone: config.runtime.timezone
-    }
-  );
+    );
+  }
 
   logger.info("Scheduler registered", {
-    cron: CRON_EXPRESSION,
+    cronExpressions,
+    times: config.runtime.scheduleTimes,
     timezone: config.runtime.timezone
   });
 }

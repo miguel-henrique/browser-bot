@@ -23,6 +23,30 @@ function toNumber(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function parseTimeList(value, fallback) {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return fallback;
+  }
+  const parts = raw
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const valid = parts.filter((item) => /^([01]?\d|2[0-3]):[0-5]\d$/.test(item));
+  return valid.length ? valid : fallback;
+}
+
+function parseDateList(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return [];
+  }
+  return raw
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => /^\d{2}\/\d{2}\/\d{4}$/.test(item));
+}
+
 function selectorEnv(name, defaultValue) {
   const value = getEnv(name, { defaultValue });
   // dotenv treats '#' as comment delimiter when values are not quoted.
@@ -52,8 +76,8 @@ const config = {
   },
   retry: {
     maxRunAttempts: toNumber(
-      getEnv("MAX_RUN_ATTEMPTS", { defaultValue: "3" }),
-      3
+      getEnv("MAX_RUN_ATTEMPTS", { defaultValue: "1" }),
+      1
     ),
     retryDelayMs: toNumber(getEnv("RETRY_DELAY_MS", { defaultValue: "3000" }), 3000)
   },
@@ -78,8 +102,8 @@ const config = {
     enabled: toBoolean(getEnv("ENABLE_CAPTCHA", { defaultValue: "true" }), true),
     provider: getEnv("CAPTCHA_PROVIDER", { defaultValue: "ocr" }),
     maxSubmitAttempts: toNumber(
-      getEnv("CAPTCHA_SUBMIT_MAX_ATTEMPTS", { defaultValue: "8" }),
-      8
+      getEnv("CAPTCHA_SUBMIT_MAX_ATTEMPTS", { defaultValue: "1" }),
+      1
     ),
     ocrLanguage: getEnv("OCR_LANGUAGE", { defaultValue: "eng" }),
     ocrNumericOnly: toBoolean(getEnv("OCR_NUMERIC_ONLY", { defaultValue: "true" }), true),
@@ -105,7 +129,19 @@ const config = {
     logLevel: getEnv("LOG_LEVEL", { defaultValue: "info" }),
     debugLogValues: toBoolean(getEnv("DEBUG_LOG_VALUES", { defaultValue: "false" }), false),
     timezone: getEnv("TIMEZONE", { defaultValue: "America/Sao_Paulo" }),
-    runOnce: toBoolean(getEnv("RUN_ONCE", { defaultValue: "false" }), false)
+    runOnce: toBoolean(getEnv("RUN_ONCE", { defaultValue: "false" }), false),
+    scheduleTimes: parseTimeList(
+      getEnv("SCHEDULE_TIMES", { defaultValue: "07:00,11:25,12:25,16:00" }),
+      ["07:00", "11:25", "12:25", "16:00"]
+    ),
+    skipDates: parseDateList(getEnv("SKIP_DATES", { defaultValue: "" }))
+  },
+  notifications: {
+    telegramEnabled: toBoolean(getEnv("TELEGRAM_FALLBACK_ENABLED", { defaultValue: "false" }), false),
+    telegramBotToken: getEnv("TELEGRAM_BOT_TOKEN", { defaultValue: "" }),
+    telegramChatId: getEnv("TELEGRAM_CHAT_ID", { defaultValue: "" }),
+    telegramReplyTimeoutMs: toNumber(getEnv("TELEGRAM_REPLY_TIMEOUT_MS", { defaultValue: "180000" }), 180000),
+    telegramPollIntervalMs: toNumber(getEnv("TELEGRAM_POLL_INTERVAL_MS", { defaultValue: "4000" }), 4000)
   }
 };
 

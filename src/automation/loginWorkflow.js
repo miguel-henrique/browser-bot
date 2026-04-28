@@ -2,6 +2,7 @@ const fs = require("fs/promises");
 const path = require("path");
 const puppeteer = require("puppeteer");
 const { solveCaptcha } = require("../captcha");
+const { solveCaptchaWithTelegram } = require("../captcha/telegramSolver");
 
 function buildRunId() {
   const now = new Date();
@@ -97,7 +98,8 @@ async function validateLoginSuccess(page, config, logger) {
   const isContextDestroyedError = (error) =>
     error &&
     typeof error.message === "string" &&
-    error.message.includes("Execution context was destroyed");
+    (error.message.includes("Execution context was destroyed") ||
+      error.message.includes("Cannot find context with specified id"));
 
   const deadlineMs = Date.now() + 12000;
   let contextResetCount = 0;
@@ -176,6 +178,60 @@ function isRetryableCaptchaError(error) {
     message.includes("captcha image changed") ||
     message.includes("captcha value mismatch before submit")
   );
+}
+
+async function attemptTelegramCaptchaRescue(page, config, logger, runId) {
+  if (!config.notifications?.telegramEnabled) {
+    return false;
+  }
+
+  logger.warn("Attempting Telegram CAPTCHA rescue");
+  await page.waitForSelector(config.selectors.captchaImage, {
+    timeout: 20000,
+    visible: true
+  });
+
+  const captchaElement = await page.$(config.selectors.captchaImage);
+  if (!captchaElement) {
+    throw new Error("CAPTCHA image element not found during Telegram rescue");
+  }
+
+  const imageBuffer = await captchaElement.screenshot({ encoding: "binary" });
+  await ensureDirExists(config.runtime.screenshotDir);
+  const rescueShot = path.join(
+    config.runtime.screenshotDir,
+    `${runId}-telegram-rescue-captcha.png`
+  );
+  await fs.writeFile(rescueShot, imageBuffer);
+  logger.info("Telegram rescue CAPTCHA image captured", { screenshot: rescueShot });
+
+  const rescuedCaptcha = await solveCaptchaWithTelegram(imageBuffer, config, logger);
+  console.log("[CAPTCHA] Telegram provided code:", rescuedCaptcha);
+
+  // After a failed submit, the page can clear credential fields.
+  await fillIfEmpty(page, config.selectors.username, config.loginUser, logger, "username");
+  await fillIfEmpty(page, config.selectors.password, config.loginPassword, logger, "password");
+
+  await page.waitForSelector(config.selectors.captchaInput, {
+    timeout: 10000,
+    visible: true
+  });
+  await page.click(config.selectors.captchaInput, { clickCount: 3 });
+  await setInputValueAndDispatch(page, config.selectors.captchaInput, rescuedCaptcha);
+
+  const settleMs = Math.max(0, Number(config.captcha.submitDelayMs) || 0);
+  if (settleMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, settleMs));
+  }
+
+  await page.waitForSelector(config.selectors.submit, { timeout: 10000, visible: true });
+  await page.click(config.selectors.submit);
+  logger.info("Submitted login form with Telegram CAPTCHA rescue");
+
+  await validateLoginSuccess(page, config, logger);
+  const successShot = await capture(page, config, runId, "telegram-rescue-success");
+  logger.info("Workflow completed with Telegram CAPTCHA rescue", { screenshot: successShot });
+  return true;
 }
 
 async function runLoginWorkflow(config, logger) {
@@ -330,6 +386,18 @@ async function runLoginWorkflow(config, logger) {
         logger.info("Workflow completed successfully", { screenshot: successShot });
         return;
       } catch (error) {
+        if (isRetryableCaptchaError(error) && captchaAttempt >= totalCaptchaAttempts) {
+          try {
+            const rescued = await attemptTelegramCaptchaRescue(page, config, logger, runId);
+            if (rescued) {
+              return;
+            }
+          } catch (rescueError) {
+            logger.warn("Telegram CAPTCHA rescue failed", {
+              error: rescueError.message
+            });
+          }
+        }
         if (isRetryableCaptchaError(error) && captchaAttempt < totalCaptchaAttempts) {
           logger.warn("Retryable CAPTCHA failure, trying a fresh captcha", {
             captchaAttempt,
