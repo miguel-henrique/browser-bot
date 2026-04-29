@@ -160,7 +160,11 @@ const config = {
     telegramBotToken: getEnv("TELEGRAM_BOT_TOKEN", { defaultValue: "" }),
     telegramChatId: getEnv("TELEGRAM_CHAT_ID", { defaultValue: "" }),
     telegramReplyTimeoutMs: toNumber(getEnv("TELEGRAM_REPLY_TIMEOUT_MS", { defaultValue: "180000" }), 180000),
-    telegramPollIntervalMs: toNumber(getEnv("TELEGRAM_POLL_INTERVAL_MS", { defaultValue: "4000" }), 4000)
+    telegramPollIntervalMs: toNumber(getEnv("TELEGRAM_POLL_INTERVAL_MS", { defaultValue: "4000" }), 4000),
+    telegramOcrMaxAttemptsAfterTimeout: toNumber(
+      getEnv("TELEGRAM_OCR_MAX_ATTEMPTS_AFTER_TIMEOUT", { defaultValue: "10" }),
+      10
+    )
   }
 };
 

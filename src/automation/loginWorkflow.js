@@ -2,7 +2,11 @@ const fs = require("fs/promises");
 const path = require("path");
 const puppeteer = require("puppeteer");
 const { solveCaptcha } = require("../captcha");
-const { solveCaptchaWithTelegram } = require("../captcha/telegramSolver");
+const {
+  solveCaptchaWithTelegram,
+  TelegramReplyTimeoutError
+} = require("../captcha/telegramSolver");
+const { solveCaptchaWithOCR } = require("../captcha/ocrSolver");
 
 function buildRunId() {
   const now = new Date();
@@ -134,6 +138,15 @@ async function validateLoginSuccess(page, config, logger) {
         throw new Error(`Login failed with page error: ${errorMessage}`);
       }
 
+      // If we see any message but it's not captcha-related, it's likely a non-retryable error
+      // (e.g. LDAP locked, invalid credentials, system outage). Abort this run for the current slot.
+      if (messages.length > 0) {
+        const firstMessage = messages[0];
+        const err = new Error(`Login failed with page error: ${firstMessage}`);
+        err.nonRetryable = true;
+        throw err;
+      }
+
       if (explicitSuccessSelector) {
         const successHandle = await page.$(explicitSuccessSelector);
         if (successHandle) {
@@ -212,7 +225,18 @@ async function attemptTelegramCaptchaRescue(page, config, logger, runId) {
     logger.info("CAPTCHA rescue: local image capture disabled by config");
   }
 
-  const rescuedCaptcha = await solveCaptchaWithTelegram(imageBuffer, config, logger);
+  let rescuedCaptcha;
+  try {
+    rescuedCaptcha = await solveCaptchaWithTelegram(imageBuffer, config, logger);
+  } catch (error) {
+    if (error && error.code === "TELEGRAM_REPLY_TIMEOUT") {
+      logger.warn("CAPTCHA rescue: Telegram timed out; switching to OCR recovery", {
+        maxAttempts: config.notifications.telegramOcrMaxAttemptsAfterTimeout
+      });
+      return attemptOcrRecoveryAfterTelegramTimeout(page, config, logger, runId, "telegram-rescue");
+    }
+    throw error;
+  }
   console.log("[CAPTCHA] Telegram provided code:", rescuedCaptcha);
 
   // After a failed submit, the page can clear credential fields.
@@ -242,13 +266,126 @@ async function attemptTelegramCaptchaRescue(page, config, logger, runId) {
   } else {
     logger.info("Workflow completed with Telegram CAPTCHA rescue");
   }
-  return true;
+  return { captchaMethodUsed: "telegram" };
+}
+
+async function attemptOcrRecoveryAfterTelegramTimeout(page, config, logger, runId, contextLabel) {
+  const maxAttempts = config.notifications.telegramOcrMaxAttemptsAfterTimeout;
+  logger.warn("OCR recovery: trying to solve CAPTCHA after Telegram timeout", {
+    context: contextLabel,
+    maxAttempts
+  });
+
+  // Reuse the same settle delay, but we want many independent OCR+submit attempts.
+  const settleMs = Math.max(0, Number(config.captcha.submitDelayMs) || 0);
+
+  for (let ocrAttempt = 1; ocrAttempt <= maxAttempts; ocrAttempt += 1) {
+    logger.info("OCR recovery attempt", { ocrAttempt, maxAttempts });
+
+    // Ensure credentials are present (they can be cleared after errors).
+    await fillIfEmpty(
+      page,
+      config.selectors.username,
+      config.loginUser,
+      logger,
+      "username"
+    );
+    await fillIfEmpty(
+      page,
+      config.selectors.password,
+      config.loginPassword,
+      logger,
+      "password"
+    );
+
+    await page.waitForSelector(config.selectors.captchaImage, {
+      timeout: 20000,
+      visible: true
+    });
+
+    const captchaElement = await page.$(config.selectors.captchaImage);
+    if (!captchaElement) {
+      throw new Error("CAPTCHA image element not found during OCR recovery");
+    }
+
+    const imageBuffer = await captchaElement.screenshot({ encoding: "binary" });
+
+    let solvedCaptcha;
+    try {
+      solvedCaptcha = await solveCaptchaWithOCR(imageBuffer, config, logger);
+    } catch (ocrError) {
+      logger.warn("OCR recovery: could not decode CAPTCHA; retrying with a fresh attempt", {
+        ocrAttempt,
+        error: ocrError.message
+      });
+      try {
+        await page.reload({
+          waitUntil: "networkidle2",
+          timeout: config.browser.navigationTimeoutMs
+        });
+      } catch (reloadError) {
+        logger.warn("OCR recovery: reload failed after OCR decode error", { error: reloadError.message });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      continue;
+    }
+
+    await page.waitForSelector(config.selectors.captchaInput, {
+      timeout: 10000,
+      visible: true
+    });
+    await page.click(config.selectors.captchaInput, { clickCount: 3 });
+    const enteredCaptcha = await setInputValueAndDispatch(
+      page,
+      config.selectors.captchaInput,
+      solvedCaptcha
+    );
+
+    if (enteredCaptcha !== solvedCaptcha) {
+      throw new Error(
+        `CAPTCHA value mismatch during OCR recovery (solved=${solvedCaptcha}, entered=${enteredCaptcha})`
+      );
+    }
+
+    if (settleMs > 0) {
+      logger.info("OCR recovery: waiting before submit", { ms: settleMs });
+      await new Promise((resolve) => setTimeout(resolve, settleMs));
+    }
+
+    await page.waitForSelector(config.selectors.submit, { timeout: 10000, visible: true });
+    await page.click(config.selectors.submit);
+    logger.info("OCR recovery: submitted login form");
+
+    try {
+      await validateLoginSuccess(page, config, logger);
+      logger.info("OCR recovery: success");
+      return { captchaMethodUsed: "ocr" };
+    } catch (error) {
+      if (isRetryableCaptchaError(error)) {
+        logger.warn("OCR recovery: captcha rejected; reloading page", { error: error.message });
+        try {
+          await page.reload({
+            waitUntil: "networkidle2",
+            timeout: config.browser.navigationTimeoutMs
+          });
+        } catch (reloadError) {
+          logger.warn("OCR recovery: reload failed", { error: reloadError.message });
+        }
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw new Error(`OCR recovery failed after ${maxAttempts} attempts`);
 }
 
 async function runLoginWorkflow(config, logger) {
   const runId = buildRunId();
   let browser;
   let activePage;
+  let captchaMethodUsed = null;
 
   try {
     logger.info("Step 1/5: launching browser", {
@@ -334,7 +471,17 @@ async function runLoginWorkflow(config, logger) {
         } else {
           logger.info("CAPTCHA image captured in memory (local screenshot disabled)");
         }
-        const solvedCaptcha = await solveCaptcha(imageBuffer, config, logger);
+        let solvedCaptcha;
+        try {
+          const solved = await solveCaptcha(imageBuffer, config, logger);
+          solvedCaptcha = solved.value;
+          captchaMethodUsed = solved.method;
+        } catch (error) {
+          if (error && error.code === "TELEGRAM_REPLY_TIMEOUT") {
+            return attemptOcrRecoveryAfterTelegramTimeout(page, config, logger, runId, "telegram-mode/timeout");
+          }
+          throw error;
+        }
 
         console.log("[CAPTCHA] Resolved code:", solvedCaptcha);
 
@@ -405,13 +552,13 @@ async function runLoginWorkflow(config, logger) {
         } else {
           logger.info("Step 5/5: workflow completed successfully");
         }
-        return;
+        return { captchaMethodUsed: captchaMethodUsed || (config.captcha.mode === "telegram" ? "telegram" : "ocr") };
       } catch (error) {
         if (isRetryableCaptchaError(error) && captchaAttempt >= totalCaptchaAttempts) {
           try {
             const rescued = await attemptTelegramCaptchaRescue(page, config, logger, runId);
             if (rescued) {
-              return;
+              return rescued;
             }
           } catch (rescueError) {
             logger.warn("Telegram CAPTCHA rescue failed", {

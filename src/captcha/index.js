@@ -10,24 +10,28 @@ async function solveCaptcha(imageBuffer, config, logger) {
       );
     }
     logger.warn("CAPTCHA mode is telegram; skipping OCR and requesting user input via Telegram");
-    return solveCaptchaWithTelegram(imageBuffer, config, logger);
+    const value = await solveCaptchaWithTelegram(imageBuffer, config, logger);
+    return { value, method: "telegram" };
   }
 
   const provider = config.captcha.provider;
 
   if (provider === "api") {
-    return solveCaptchaWithApi(imageBuffer, config, logger);
+    const value = await solveCaptchaWithApi(imageBuffer, config, logger);
+    return { value, method: "api" };
   }
 
   if (provider === "ocr") {
     try {
-      return await solveCaptchaWithOCR(imageBuffer, config, logger);
+      const value = await solveCaptchaWithOCR(imageBuffer, config, logger);
+      return { value, method: "ocr" };
     } catch (error) {
       if (config.notifications.telegramEnabled) {
         logger.warn("OCR failed; falling back to Telegram CAPTCHA prompt", {
           error: error.message
         });
-        return solveCaptchaWithTelegram(imageBuffer, config, logger);
+        const value = await solveCaptchaWithTelegram(imageBuffer, config, logger);
+        return { value, method: "telegram" };
       }
       throw error;
     }

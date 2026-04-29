@@ -1,6 +1,16 @@
 const fs = require("fs/promises");
 const path = require("path");
 
+class TelegramReplyTimeoutError extends Error {
+  constructor(timeoutMs) {
+    super(`Telegram fallback timed out after ${timeoutMs}ms`);
+    this.name = "TelegramReplyTimeoutError";
+    this.code = "TELEGRAM_REPLY_TIMEOUT";
+    this.timeoutMs = timeoutMs;
+    this.nonRetryable = true;
+  }
+}
+
 async function telegramRequest(config, method, payload, logger) {
   const token = config.notifications.telegramBotToken;
   const url = `https://api.telegram.org/bot${token}/${method}`;
@@ -144,7 +154,7 @@ async function solveCaptchaWithTelegram(imageBuffer, config, logger) {
     }
   }
 
-  throw new Error(`Telegram fallback timed out after ${timeoutMs}ms`);
+  throw new TelegramReplyTimeoutError(timeoutMs);
 }
 
-module.exports = { solveCaptchaWithTelegram, sendTelegramMessage };
+module.exports = { solveCaptchaWithTelegram, sendTelegramMessage, TelegramReplyTimeoutError };

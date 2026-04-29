@@ -123,6 +123,7 @@ TELEGRAM_CHAT_ID=<YOUR_CHAT_ID>
 
 When OCR fails (or when `CAPTCHA_MODE=telegram`), you receive the captcha image in Telegram with caption `Enter Code`.  
 Reply with the 4-digit code and you receive `Received code: XXXX.`.  
+If you do not reply within `TELEGRAM_REPLY_TIMEOUT_MS` (default 3 minutes), the bot switches to automatic OCR attempts and tries up to `TELEGRAM_OCR_MAX_ATTEMPTS_AFTER_TIMEOUT` (default 10). After that it aborts this run and waits for the next scheduled slot.  
 After a successful run, the bot also sends execution success + next scheduled execution info.
 
 ### Testing Telegram-only flow

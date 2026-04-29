@@ -14,6 +14,9 @@ async function withRetry(taskFn, options) {
       return await taskFn(attempt);
     } catch (error) {
       lastError = error;
+      if (error && error.nonRetryable) {
+        throw error;
+      }
       logger.warn(`${taskName}: attempt failed`, {
         attempt,
         attempts,

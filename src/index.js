@@ -91,11 +91,11 @@ function getNextExecutionInfo(configObj, fromDate = new Date()) {
   return null;
 }
 
-function formatModeLabel(mode) {
-  return mode === "telegram" ? "Telegram Mode" : "Auto Mode";
+function formatModeLabel(captchaMethodUsed) {
+  return captchaMethodUsed === "telegram" ? "Telegram Mode" : "Auto Mode";
 }
 
-async function notifySuccess(configObj, logger) {
+async function notifySuccess(configObj, logger, runResult) {
   if (!configObj.notifications.telegramEnabled) {
     return;
   }
@@ -109,9 +109,15 @@ async function notifySuccess(configObj, logger) {
 
   const nextLine = next
     ? `Next execution at ${next.time} ${next.date}`
-    : "Next execution at Date and Time unavailable";
+    : "Next execution unavailable";
 
-  const text = `Success! ${formatModeLabel(configObj.captcha.mode)} mode at ${currentStamp}\n${nextLine}`;
+  const captchaMethodUsed =
+    runResult?.captchaMethodUsed ||
+    (configObj.captcha.mode === "telegram" ? "telegram" : "ocr");
+  const modeLabel = formatModeLabel(captchaMethodUsed);
+  const text = `Success!! ${modeLabel} at ${currentStamp}\nNext execution at ${
+    next ? `${next.time} ${next.date}` : "unavailable"
+  }`;
   await sendTelegramMessage(configObj, text, logger);
 }
 
@@ -127,10 +133,10 @@ async function executeScheduledRun(trigger) {
   const startedAt = new Date().toISOString();
   logger.info("Run started", { trigger, startedAt, mode: config.captcha.mode });
 
-  await withRetry(
+  const runResult = await withRetry(
     async (attempt) => {
       logger.info("Attempt started", { attempt });
-      await runLoginWorkflow(config, logger);
+      return runLoginWorkflow(config, logger);
     },
     {
       attempts: config.retry.maxRunAttempts,
@@ -142,7 +148,7 @@ async function executeScheduledRun(trigger) {
 
   logger.info("Automation run completed", { trigger });
   try {
-    await notifySuccess(config, logger);
+    await notifySuccess(config, logger, runResult);
   } catch (notifyError) {
     logger.warn("Success Telegram notification failed", { error: notifyError.message });
   }
