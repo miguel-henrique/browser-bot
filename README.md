@@ -52,32 +52,45 @@ npm start
 npm run run:once
 ```
 
-## Stop / Inspect
+## Process Management (PM2)
 
-- Stop foreground run: `Ctrl+C`
-- Run in background:
+Use PM2 to keep the scheduler running in background, with easy start/stop/restart and logs.
+
+1. Install dependencies (PM2 is included as a dev dependency):
+
+```bash
+npm install
+```
+
+2. Start bot in background:
+
+```bash
+npm run pm2:start
+```
+
+3. Useful runtime commands:
+
+```bash
+npm run pm2:status   # see process status
+npm run pm2:logs     # stream logs (Ctrl+C to exit logs view)
+npm run pm2:restart  # restart app
+npm run pm2:stop     # stop app without removing config
+npm run pm2:delete   # stop and remove from PM2 list
+```
+
+4. Optional: persist PM2 process list (after start/restart):
+
+```bash
+npm run pm2:save
+```
+
+### Fallback without PM2
+
+If you prefer not to use PM2, you can still run in background with `nohup`:
 
 ```bash
 nohup npm start > bot.log 2>&1 &
 echo $! > bot.pid
-```
-
-- Check process:
-
-```bash
-ps -fp "$(cat bot.pid)"
-```
-
-- Tail logs:
-
-```bash
-tail -f bot.log
-```
-
-- Stop background process:
-
-```bash
-kill "$(cat bot.pid)"
 ```
 
 ## Schedule and Timezone

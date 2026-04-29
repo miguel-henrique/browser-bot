@@ -7,7 +7,14 @@
   "scripts": {
     "start": "node src/index.js",
     "run:once": "RUN_ONCE=true node src/index.js",
-    "check": "node --check src/index.js"
+    "check": "node --check src/index.js",
+    "pm2:start": "pm2 start pm2.config.cjs --only browser-bot",
+    "pm2:stop": "pm2 stop browser-bot",
+    "pm2:restart": "pm2 restart browser-bot",
+    "pm2:status": "pm2 status browser-bot",
+    "pm2:logs": "pm2 logs browser-bot --lines 200",
+    "pm2:delete": "pm2 delete browser-bot",
+    "pm2:save": "pm2 save"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -19,5 +26,8 @@
     "puppeteer": "^24.9.0",
     "sharp": "^0.34.5",
     "tesseract.js": "^5.1.1"
+  },
+  "devDependencies": {
+    "pm2": "^6.0.8"
   }
 }

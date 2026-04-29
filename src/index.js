@@ -6,6 +6,7 @@ const { runLoginWorkflow } = require("./automation/loginWorkflow");
 const { sendTelegramMessage } = require("./captcha/telegramSolver");
 
 const logger = createLogger(config.runtime.logLevel);
+let isShuttingDown = false;
 
 function toDdMmYyyy(date, timezone) {
   const parts = new Intl.DateTimeFormat("pt-BR", {
@@ -206,5 +207,17 @@ process.on("unhandledRejection", (reason) => {
 process.on("uncaughtException", (error) => {
   logger.error("Uncaught exception", { error: error.message });
 });
+
+function handleShutdown(signal) {
+  if (isShuttingDown) {
+    return;
+  }
+  isShuttingDown = true;
+  logger.info("Shutdown signal received", { signal });
+  process.exit(0);
+}
+
+process.on("SIGINT", () => handleShutdown("SIGINT"));
+process.on("SIGTERM", () => handleShutdown("SIGTERM"));
 
 bootstrap();
